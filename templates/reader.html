@@ -36,6 +36,31 @@
         .nav-btn:hover { background: #3498db; color: white; }
         .nav-btn.disabled { opacity: 0.5; pointer-events: none; border-color: #ccc; color: #ccc; }
 
+        /* Copy Button */
+        .copy-btn {
+            margin-left: 10px;
+            font-size: 0.7em;
+            padding: 4px 8px;
+            cursor: pointer;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 12px;
+            color: #666;
+            vertical-align: middle;
+            font-family: -apple-system, sans-serif;
+            transition: all 0.2s;
+            float: right;
+        }
+        .copy-btn:hover {
+            background: #f0f0f0;
+            color: #333;
+            border-color: #ccc;
+        }
+
+        /* Bionic Reading */
+        .bionic-bold {
+            font-weight: 700;
+        }
     </style>
 </head>
 <body>
@@ -44,6 +69,9 @@
     <div id="sidebar">
         <a href="/" class="nav-home">← Back to Library</a>
         <div class="nav-header">{{ book.metadata.title }}</div>
+        <div style="margin-bottom: 20px;">
+             <button id="bionic-toggle" class="nav-btn" style="width: 100%; text-align: center; font-size: 0.9em;">Enable Bionic Reading</button>
+        </div>
 
         <!-- Recursive Macro for TOC -->
         {% macro render_toc(items) %}
@@ -78,7 +106,7 @@
 
                        BETTER FIX: Use JavaScript to match filenames.
                     -->
-                    <a href="#" onclick="findAndGo('{{ item.file_href }}')"
+                    <a href="#" onclick="findAndGo('{{ item.href }}')"
                        class="toc-link {% if is_active %}active{% endif %}">
                         {{ item.title }}
                     </a>
@@ -97,7 +125,7 @@
     <!-- MAIN CONTENT -->
     <div id="main">
         <div class="content-container">
-            <div class="book-content">
+            <div class="book-content" id="book-content-area">
                 {{ current_chapter.content | safe }}
             </div>
 
@@ -140,15 +168,173 @@
             const idx = spineMap[cleanFile];
 
             if (idx !== undefined) {
+                // Check if we are already on this page (chapter_index is injected via Jinja)
+                const currentIdx = {{ chapter_index }};
+                
+                if (idx === currentIdx && anchor) {
+                    // Same page, just scroll to anchor
+                    const el = document.getElementById(anchor);
+                    if (el) {
+                        el.scrollIntoView();
+                        return;
+                    }
+                    // If element not found, we might reload or just warn
+                    console.warn("Anchor found but element missing:", anchor);
+                }
+
                 let url = "/read/{{ book_id }}/" + idx;
-                // If there was an anchor, we could try to scroll to it,
-                // but simple page loads often lose anchor position without extra JS.
-                // Let's just go to the page.
+                // If there was an anchor, append it to the URL
+                if (anchor) {
+                    url += "#" + anchor;
+                }
                 window.location.href = url;
             } else {
                 console.log("Could not find index for", filename);
             }
         }
+
+        function copySection(btn) {
+            // The button is placed immediately after the header
+            const header = btn.previousElementSibling;
+            if (!header) {
+                console.warn("Copy button not linked to a header");
+                return;
+            }
+
+            // Start with the header text itself
+            let content = header.innerText + "\n\n";
+            
+            let current = btn.nextSibling;
+            
+            while (current) {
+                if (current.nodeType === 1) { // Element
+                    // Check if it's a header (marked by backend or standard tag)
+                    if (current.classList.contains('detected-header') || /^H[1-6]$/.test(current.tagName)) {
+                        break; // End of section
+                    }
+                    // Append text
+                    content += current.innerText + "\n";
+                } else if (current.nodeType === 3) { // Text node
+                     // Ignore pure whitespace text nodes to avoid clutter
+                     if (current.textContent.trim().length > 0) {
+                        content += current.textContent + "\n";
+                     }
+                }
+                current = current.nextSibling;
+            }
+
+            navigator.clipboard.writeText(content.trim()).then(() => {
+                const originalText = btn.innerText;
+                btn.innerText = "Copied!";
+                setTimeout(() => btn.innerText = originalText, 2000);
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+            });
+        }
+
+        // --- Bionic Reading Logic ---
+
+        function bionicifyText(text, ratio = 0.4, minBold = 1) {
+            // Split on whitespace but keep the spaces in the result
+            const tokens = text.split(/(\s+)/);
+
+            const transformed = tokens.map(token => {
+                // If it's just whitespace, return as-is
+                if (/^\s+$/.test(token)) return token;
+
+                // Skip empty tokens
+                if (!token.length) return token;
+
+                const len = token.length;
+                const boldCount = Math.max(minBold, Math.ceil(len * ratio));
+
+                const boldPart = token.slice(0, boldCount);
+                const restPart = token.slice(boldCount);
+
+                return `<span class="bionic-word"><span class="bionic-bold">${boldPart}</span>${restPart}</span>`;
+            });
+
+            return transformed.join("");
+        }
+
+        function applyBionicReading(rootElement) {
+             // We need to traverse text nodes carefully to avoid breaking HTML structure
+             // Using a TreeWalker is efficient for this.
+             const walker = document.createTreeWalker(
+                rootElement,
+                NodeFilter.SHOW_TEXT,
+                {
+                    acceptNode: function(node) {
+                        // Skip if parent is already bionic-word or if it's script/style
+                        if (node.parentElement.classList.contains('bionic-bold') || 
+                            node.parentElement.classList.contains('bionic-word') ||
+                            node.parentElement.tagName === 'SCRIPT' ||
+                            node.parentElement.tagName === 'STYLE' || 
+                            node.parentElement.tagName === 'BUTTON') { // Skip buttons
+                            return NodeFilter.FILTER_REJECT;
+                        }
+                        // Skip whitespace-only nodes
+                        if (!node.textContent.trim()) {
+                            return NodeFilter.FILTER_SKIP;
+                        }
+                        return NodeFilter.FILTER_ACCEPT;
+                    }
+                }
+             );
+
+             const textNodes = [];
+             let node;
+             while(node = walker.nextNode()) {
+                 textNodes.push(node);
+             }
+
+             // Replace text nodes with span wrappers containing bionic HTML
+             textNodes.forEach(textNode => {
+                 const span = document.createElement('span');
+                 span.innerHTML = bionicifyText(textNode.textContent);
+                 span.dataset.originalText = textNode.textContent; // Store for toggling back
+                 span.classList.add('bionic-wrapper');
+                 textNode.parentNode.replaceChild(span, textNode);
+             });
+        }
+
+        function removeBionicReading(rootElement) {
+            // Find all wrappers we created
+            const wrappers = rootElement.querySelectorAll('.bionic-wrapper');
+            wrappers.forEach(span => {
+                const originalText = span.dataset.originalText;
+                const textNode = document.createTextNode(originalText);
+                span.parentNode.replaceChild(textNode, span);
+            });
+        }
+
+        const bionicToggleBtn = document.getElementById('bionic-toggle');
+        const contentArea = document.getElementById('book-content-area');
+        let isBionicEnabled = false;
+
+        // Check local storage preference
+        if (localStorage.getItem('bionicMode') === 'true') {
+            isBionicEnabled = true;
+            bionicToggleBtn.innerText = "Disable Bionic Reading";
+            // Apply after a short delay to ensure DOM is ready? 
+            // Actually script is at bottom, so content is ready.
+            applyBionicReading(contentArea);
+        }
+
+        bionicToggleBtn.addEventListener('click', () => {
+            if (isBionicEnabled) {
+                removeBionicReading(contentArea);
+                bionicToggleBtn.innerText = "Enable Bionic Reading";
+                localStorage.setItem('bionicMode', 'false');
+                isBionicEnabled = false;
+            } else {
+                applyBionicReading(contentArea);
+                bionicToggleBtn.innerText = "Disable Bionic Reading";
+                localStorage.setItem('bionicMode', 'true');
+                isBionicEnabled = true;
+            }
+        });
+
     </script>
 </body>
 </html>

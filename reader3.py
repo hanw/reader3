@@ -86,6 +86,87 @@ def clean_html_content(soup: BeautifulSoup) -> BeautifulSoup:
     return soup
 
 
+def get_header_identifiers(toc_tree: List[TOCEntry], filename: str) -> tuple[List[str], bool]:
+    """
+    Returns a list of anchor IDs that point to this file,
+    and a boolean indicating if the file itself is a TOC target (no anchor).
+    """
+    anchors = []
+    is_root = False
+    stack = list(toc_tree)
+    while stack:
+        entry = stack.pop()
+        if entry.file_href == filename:
+            if entry.anchor:
+                anchors.append(entry.anchor)
+            else:
+                is_root = True
+        stack.extend(entry.children)
+    return anchors, is_root
+
+
+def inject_copy_buttons(soup: BeautifulSoup, toc_anchors: List[str] = None, is_toc_root: bool = False) -> BeautifulSoup:
+    """
+    Injects a copy button after each section title (h1-h6) OR elements identified by TOC.
+    The button calls a global JS function 'copySection(this)'.
+    """
+    toc_anchors = toc_anchors or []
+    
+    # 1. Standard headers
+    targets = []
+    for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+        targets.append(h)
+        
+    # 2. Anchor-based headers (from TOC)
+    for anchor in toc_anchors:
+        tag = soup.find(id=anchor)
+        if tag:
+            targets.append(tag)
+            
+    # 3. Root header (if applicable and no other headers found at top?)
+    # If the file is a TOC target, we try to find the "first visual element"
+    if is_toc_root:
+        body = soup.find('body')
+        if body:
+            # We look for the first non-empty tag
+            for child in body.children:
+                if child.name: # It's a tag
+                    targets.append(child)
+                    break
+
+    # Process targets
+    processed_ids = set()
+    
+    for header in targets:
+        # Avoid duplicates (e.g. h1 that also has an ID)
+        # Use object identity or unique ID if available
+        if id(header) in processed_ids:
+            continue
+        processed_ids.add(id(header))
+
+        # Check if already processed (e.g. via recursive calls if we did that, strict check here)
+        classes = header.get('class', [])
+        if isinstance(classes, str): classes = classes.split()
+        if 'detected-header' in classes:
+            continue
+
+        # Add marker class for frontend JS
+        classes.append('detected-header')
+        header['class'] = classes
+        
+        # Create button
+        btn = soup.new_tag('button')
+        btn.string = "Copy"
+        btn['class'] = 'copy-btn'
+        # We use an inline onclick to trigger the frontend logic
+        btn['onclick'] = 'copySection(this)'
+        
+        # Insert after header
+        header.insert_after(btn)
+
+    return soup
+
+
 def extract_plain_text(soup: BeautifulSoup) -> str:
     """Extract clean text for LLM/Search usage."""
     text = soup.get_text(separator=' ')
@@ -250,6 +331,10 @@ def process_epub(epub_path: str, output_dir: str) -> Book:
 
             # B. Clean HTML
             soup = clean_html_content(soup)
+            
+            # Get TOC info for this file
+            anchors, is_root = get_header_identifiers(toc_structure, item.get_name())
+            soup = inject_copy_buttons(soup, anchors, is_root)
 
             # C. Extract Body Content only
             body = soup.find('body')
